@@ -13,6 +13,7 @@ import ida_ua
 
 from .rpc import tool
 from .sync import idasync, IDAError
+from .api_core import invalidate_funcs_cache, invalidate_globals_cache
 from .utils import (
     parse_address,
     decompile_checked,
@@ -432,8 +433,10 @@ def rename(batch: RenameBatch) -> dict:
     result = {}
     if "func" in batch:
         result["func"] = _rename_funcs(_normalize_items(batch["func"]))
+        invalidate_funcs_cache()
     if "data" in batch:
         result["data"] = _rename_globals(_normalize_items(batch["data"]))
+        invalidate_globals_cache()
     if "local" in batch:
         result["local"] = _rename_locals(_normalize_items(batch["local"]))
     if "stack" in batch:
@@ -559,6 +562,7 @@ def define_func(items: list[DefineOp] | DefineOp) -> list[DefineResult]:
         raise IDAError(f"Batch too large: maximum {_MAX_BATCH_SIZE} items per request")
 
     results: list[DefineResult] = []
+    had_success = False
     for item in items:
         addr_str = item.get("addr", "")
         end_str = item.get("end", "")
@@ -604,6 +608,7 @@ def define_func(items: list[DefineOp] | DefineOp) -> list[DefineResult]:
 
             if ida_funcs.add_func(start_ea, end_ea):
                 func = idaapi.get_func(start_ea)
+                had_success = True
                 results.append({
                     "addr": addr_str,
                     "start": hex(func.start_ea),
@@ -617,6 +622,10 @@ def define_func(items: list[DefineOp] | DefineOp) -> list[DefineResult]:
                 })
         except Exception as e:
             results.append({"addr": addr_str, "error": str(e)})
+
+    if had_success:
+        invalidate_funcs_cache()
+        invalidate_globals_cache()
 
     return results
 

@@ -33,6 +33,7 @@ class TestServerInit:
         assert "refresh_tools" in server._tool_cache
         assert "get_cached_output" in server._tool_cache
         assert "decompile_to_file" in server._tool_cache
+        assert "refresh_caches" in server._tool_cache
 
 
 class TestToolsList:
@@ -41,6 +42,7 @@ class TestToolsList:
         tool_names = [t["name"] for t in resp["result"]["tools"]]
         assert "list_instances" in tool_names
         assert "refresh_tools" in tool_names
+        assert "refresh_caches" in tool_names
 
 
 class TestToolsCall:

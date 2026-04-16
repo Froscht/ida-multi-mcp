@@ -21,6 +21,12 @@ from .sync import idasync
 # Cached strings list: [(ea, text), ...]
 _strings_cache: list[tuple[int, str]] | None = None
 
+# Cached function list: [Function(...), ...]
+_funcs_cache: list["Function"] | None = None
+
+# Cached globals list: [Global(...), ...]
+_globals_cache: list["Global"] | None = None
+
 
 def _get_strings_cache() -> list[tuple[int, str]]:
     """Get cached strings, building cache on first access."""
@@ -36,12 +42,75 @@ def invalidate_strings_cache():
     _strings_cache = None
 
 
+def _get_funcs_cache() -> list["Function"]:
+    """Get cached function list, building cache on first access."""
+    global _funcs_cache
+    if _funcs_cache is None:
+        _funcs_cache = [get_function(addr) for addr in idautils.Functions()]
+    return _funcs_cache
+
+
+def invalidate_funcs_cache():
+    """Clear the function cache (call after function changes)."""
+    global _funcs_cache
+    _funcs_cache = None
+
+
+def _get_globals_cache() -> list["Global"]:
+    """Get cached globals list, building cache on first access."""
+    global _globals_cache
+    if _globals_cache is None:
+        _globals_cache = []
+        for addr, name in idautils.Names():
+            if not idaapi.get_func(addr) and name is not None:
+                _globals_cache.append(Global(addr=hex(addr), name=name))
+    return _globals_cache
+
+
+def invalidate_globals_cache():
+    """Clear the globals cache (call after data changes)."""
+    global _globals_cache
+    _globals_cache = None
+
+
 def init_caches():
-    """Build caches on plugin startup (called from Ctrl+M)."""
+    """Build caches on plugin startup."""
     t0 = time.perf_counter()
     strings = _get_strings_cache()
     t1 = time.perf_counter()
     print(f"[MCP] Cached {len(strings)} strings in {(t1-t0)*1000:.0f}ms")
+
+    funcs = _get_funcs_cache()
+    t2 = time.perf_counter()
+    print(f"[MCP] Cached {len(funcs)} functions in {(t2-t1)*1000:.0f}ms")
+
+    globals_ = _get_globals_cache()
+    t3 = time.perf_counter()
+    print(f"[MCP] Cached {len(globals_)} globals in {(t3-t2)*1000:.0f}ms")
+
+
+@tool
+@idasync
+def refresh_caches() -> dict:
+    """Force-refresh all caches (strings, functions, globals)."""
+    invalidate_strings_cache()
+    invalidate_funcs_cache()
+    invalidate_globals_cache()
+
+    t0 = time.perf_counter()
+    strings = _get_strings_cache()
+    t1 = time.perf_counter()
+    funcs = _get_funcs_cache()
+    t2 = time.perf_counter()
+    globals_ = _get_globals_cache()
+    t3 = time.perf_counter()
+
+    return {
+        "strings": len(strings),
+        "functions": len(funcs),
+        "globals": len(globals_),
+        "time_ms": round((t3 - t0) * 1000),
+    }
 
 
 from .utils import (
@@ -216,7 +285,7 @@ def list_funcs(
     queries = normalize_dict_list(
         queries, lambda s: {"offset": 0, "count": 50, "filter": s}
     )
-    all_functions = [get_function(addr) for addr in idautils.Functions()]
+    all_functions = _get_funcs_cache()
 
     results = []
     for query in queries:
@@ -246,10 +315,7 @@ def list_globals(
     queries = normalize_dict_list(
         queries, lambda s: {"offset": 0, "count": 50, "filter": s}
     )
-    all_globals: list[Global] = []
-    for addr, name in idautils.Names():
-        if not idaapi.get_func(addr) and name is not None:
-            all_globals.append(Global(addr=hex(addr), name=name))
+    all_globals = _get_globals_cache()
 
     results = []
     for query in queries:

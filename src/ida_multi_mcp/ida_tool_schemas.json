@@ -222,6 +222,38 @@
     }
   },
   {
+    "name": "refresh_caches",
+    "description": "Force-refresh all caches (strings, functions, globals). Call this after bulk modifications to ensure list_funcs/list_globals return fresh data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "strings": {
+          "type": "integer"
+        },
+        "functions": {
+          "type": "integer"
+        },
+        "globals": {
+          "type": "integer"
+        },
+        "time_ms": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "strings",
+        "functions",
+        "globals",
+        "time_ms"
+      ]
+    }
+  },
+  {
     "name": "imports",
     "description": "List imports",
     "inputSchema": {
