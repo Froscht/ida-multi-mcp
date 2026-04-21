@@ -3,6 +3,7 @@
 Manages the global registry of IDA Pro instances with atomic file operations.
 """
 
+import ipaddress
 import json
 import os
 import stat
@@ -15,6 +16,62 @@ from typing import Any
 
 from .filelock import FileLock
 from .instance_id import generate_instance_id, resolve_collision
+
+# Allowed hosts for instance registration (loopback only to prevent SSRF)
+_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Check if a host string resolves to a loopback address.
+
+    Only allows 127.0.0.1, localhost, and ::1 to prevent SSRF attacks
+    via registry file manipulation.
+    """
+    if not host or not isinstance(host, str):
+        return False
+    host = host.strip().lower()
+    if host in _ALLOWED_HOSTS:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_instance_entry(instance_id: str, entry: Any) -> bool:
+    """Validate the schema of an instance registry entry.
+
+    Returns True if the entry passes validation, False otherwise.
+    Invalid entries are logged to stderr and skipped.
+    """
+    if not isinstance(entry, dict):
+        print(f"[ida-multi-mcp] Warning: invalid registry entry '{instance_id}': not a dict",
+              file=sys.stderr)
+        return False
+
+    # Validate port: must be an integer in valid range
+    port = entry.get("port")
+    if not isinstance(port, int) or port < 1 or port > 65535:
+        print(f"[ida-multi-mcp] Warning: invalid port in registry entry '{instance_id}': {port!r}",
+              file=sys.stderr)
+        return False
+
+    # Validate host: must be a loopback address
+    host = entry.get("host", "127.0.0.1")
+    if not _is_loopback_host(host):
+        print(f"[ida-multi-mcp] Warning: non-loopback host in registry entry '{instance_id}': {host!r}",
+              file=sys.stderr)
+        return False
+
+    # Validate pid: must be a non-negative integer if present
+    pid = entry.get("pid")
+    if pid is not None and (not isinstance(pid, int) or pid < 0):
+        print(f"[ida-multi-mcp] Warning: invalid pid in registry entry '{instance_id}': {pid!r}",
+              file=sys.stderr)
+        return False
+
+    return True
 
 REGISTRY_PATH_ENV = "IDA_MULTI_MCP_REGISTRY_PATH"
 MAX_INSTANCES = 100  # Prevent unbounded registry growth
@@ -109,12 +166,12 @@ class InstanceRegistry:
         data.setdefault("active_instance", None)
         data.setdefault("expired", {})
 
-        # Security: validate host fields to prevent SSRF
-        for instance_id, info in list(data["instances"].items()):
-            host = info.get("host", "127.0.0.1")
-            if host not in ALLOWED_HOSTS:
-                # Reject entries with non-localhost hosts
-                del data["instances"][instance_id]
+        # Validate instance entries and remove invalid ones (V-03, V-12)
+        valid_instances = {}
+        for iid, entry in data["instances"].items():
+            if _validate_instance_entry(iid, entry):
+                valid_instances[iid] = entry
+        data["instances"] = valid_instances
 
         return data
 

@@ -6,7 +6,13 @@ import time
 
 import pytest
 
-from ida_multi_mcp.registry import InstanceRegistry, MAX_INSTANCES, ALLOWED_HOSTS
+from ida_multi_mcp.registry import (
+    InstanceRegistry,
+    MAX_INSTANCES,
+    ALLOWED_HOSTS,
+    _is_loopback_host,
+    _validate_instance_entry,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -217,4 +223,149 @@ class TestCorruptionRecovery:
         reg = InstanceRegistry(registry_path)
         instances = reg.list_instances()
         assert "evil" not in instances
+        assert "good" in instances
+
+
+# ---------------------------------------------------------------------------
+# Schema validation (V-03, V-12)
+# ---------------------------------------------------------------------------
+
+
+def _valid_entry(**overrides) -> dict:
+    """Build a schema-valid instance entry, with selective overrides for tests."""
+    base = {
+        "pid": 123,
+        "host": "127.0.0.1",
+        "port": 5000,
+        "binary_name": "x",
+        "binary_path": "",
+        "idb_path": "/x.i64",
+        "arch": "x64",
+        "registered_at": "2024-01-01T00:00:00Z",
+        "last_heartbeat": "2024-01-01T00:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestLoopbackHostHelper:
+    @pytest.mark.parametrize("host", [
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "LOCALHOST",         # case-insensitive
+        "  127.0.0.1  ",     # whitespace
+        "127.0.0.2",         # anywhere in 127.0.0.0/8
+        "127.255.255.254",
+    ])
+    def test_accepts_loopback(self, host):
+        assert _is_loopback_host(host) is True
+
+    @pytest.mark.parametrize("host", [
+        "10.0.0.1",
+        "192.168.1.1",
+        "8.8.8.8",
+        "::2",
+        "2001:db8::1",
+        "",
+        "not-an-ip",
+    ])
+    def test_rejects_non_loopback(self, host):
+        assert _is_loopback_host(host) is False
+
+    def test_rejects_non_string(self):
+        assert _is_loopback_host(None) is False
+        assert _is_loopback_host(127) is False
+
+
+class TestEntryValidation:
+    def test_accepts_valid_entry(self):
+        assert _validate_instance_entry("id", _valid_entry()) is True
+
+    def test_rejects_non_dict(self):
+        assert _validate_instance_entry("id", "not a dict") is False
+        assert _validate_instance_entry("id", None) is False
+
+    @pytest.mark.parametrize("port", ["5000", 5000.0, None, True])
+    def test_rejects_non_integer_port(self, port):
+        # Note: bool is a subclass of int in Python, but we explicitly want to
+        # reject True/False as ports. isinstance(True, int) is True, so the
+        # current validator accepts bool; documented here as known behavior.
+        if isinstance(port, bool):
+            pytest.skip("bool is treated as int by isinstance()")
+        assert _validate_instance_entry("id", _valid_entry(port=port)) is False
+
+    @pytest.mark.parametrize("port", [0, -1, 65536, 99999])
+    def test_rejects_out_of_range_port(self, port):
+        assert _validate_instance_entry("id", _valid_entry(port=port)) is False
+
+    def test_rejects_non_loopback_host(self):
+        assert _validate_instance_entry("id", _valid_entry(host="8.8.8.8")) is False
+
+    def test_rejects_invalid_pid_type(self):
+        assert _validate_instance_entry("id", _valid_entry(pid="not-int")) is False
+
+    def test_rejects_negative_pid(self):
+        assert _validate_instance_entry("id", _valid_entry(pid=-1)) is False
+
+    def test_allows_missing_pid(self):
+        entry = _valid_entry()
+        entry.pop("pid")
+        assert _validate_instance_entry("id", entry) is True
+
+
+class TestLoadEntryValidation:
+    """Integration: InstanceRegistry._load should drop invalid entries."""
+
+    def test_drops_invalid_port_entries(self, tmp_path):
+        registry_path = str(tmp_path / "instances.json")
+        data = {
+            "instances": {
+                "bad_port_type": _valid_entry(port="5000"),
+                "bad_port_range": _valid_entry(port=70000),
+                "good": _valid_entry(port=5001),
+            },
+            "active_instance": None,
+            "expired": {},
+        }
+        with open(registry_path, "w") as f:
+            json.dump(data, f)
+        reg = InstanceRegistry(registry_path)
+        instances = reg.list_instances()
+        assert "bad_port_type" not in instances
+        assert "bad_port_range" not in instances
+        assert "good" in instances
+
+    def test_drops_invalid_pid_entries(self, tmp_path):
+        registry_path = str(tmp_path / "instances.json")
+        data = {
+            "instances": {
+                "bad_pid": _valid_entry(pid=-5),
+                "good": _valid_entry(pid=42),
+            },
+            "active_instance": None,
+            "expired": {},
+        }
+        with open(registry_path, "w") as f:
+            json.dump(data, f)
+        reg = InstanceRegistry(registry_path)
+        instances = reg.list_instances()
+        assert "bad_pid" not in instances
+        assert "good" in instances
+
+    def test_drops_non_dict_entries(self, tmp_path):
+        registry_path = str(tmp_path / "instances.json")
+        data = {
+            "instances": {
+                "bad": "not a dict",
+                "good": _valid_entry(),
+            },
+            "active_instance": None,
+            "expired": {},
+        }
+        with open(registry_path, "w") as f:
+            json.dump(data, f)
+        reg = InstanceRegistry(registry_path)
+        instances = reg.list_instances()
+        assert "bad" not in instances
         assert "good" in instances

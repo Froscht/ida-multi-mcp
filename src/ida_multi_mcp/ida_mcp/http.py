@@ -84,7 +84,10 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
         self.update_cors_policy()
 
     def update_cors_policy(self):
-        match config_json_get("cors_policy", DEFAULT_CORS_POLICY):
+        policy = config_json_get("cors_policy", DEFAULT_CORS_POLICY)
+        if policy not in ("unrestricted", "local", "direct"):
+            policy = DEFAULT_CORS_POLICY
+        match policy:
             case "unrestricted":
                 self.mcp_server.cors_allowed_origins = "*"
             case "local":
