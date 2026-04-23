@@ -89,14 +89,24 @@ class TestArchitectureFixes(unittest.TestCase):
 
             server.router.route_request = fake_route_request
 
-            result = server._handle_decompile_to_file(
-                {
-                    "addrs": ["0x401000", "0x402000"],
-                    "output_dir": out_dir,
-                    "mode": "single",
-                    "instance_id": "abcd",
-                }
-            )
+            # The hardened output_dir check rejects absolute paths outside CWD
+            # unless this opt-in is set. The test uses a tempdir outside CWD.
+            old_allow = os.environ.get("IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT")
+            os.environ["IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT"] = "1"
+            try:
+                result = server._handle_decompile_to_file(
+                    {
+                        "addrs": ["0x401000", "0x402000"],
+                        "output_dir": out_dir,
+                        "mode": "single",
+                        "instance_id": "abcd",
+                    }
+                )
+            finally:
+                if old_allow is None:
+                    os.environ.pop("IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT", None)
+                else:
+                    os.environ["IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT"] = old_allow
 
             self.assertEqual(result["success"], 2)
             files = sorted(result["files"])

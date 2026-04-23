@@ -364,12 +364,37 @@ class IdaMultiMcpServer:
                 "hint": "Call list_instances() and pass instance_id explicitly.",
             }
 
-        # Security: validate output_dir to prevent path traversal
-        resolved_dir = os.path.realpath(output_dir)
-        # Reject absolute paths that escape CWD unless they are subdirectories
+        # Security: confine writes to the current working directory by default.
+        #
+        # A naive realpath() accepted *any* absolute path, which means an LLM
+        # prompt-injection could direct decompile_to_file at arbitrary system
+        # paths (~/.ssh, %APPDATA%, etc.). We now require output_dir to resolve
+        # under CWD; users who legitimately need elsewhere can set
+        # IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT=1 to opt in.
         if ".." in os.path.normpath(output_dir).split(os.sep):
             return {"error": "output_dir must not contain '..' path components"}
-        # Warn but allow absolute paths (they may be intentional from the user)
+
+        allow_absolute = os.environ.get(
+            "IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        resolved_dir = os.path.realpath(output_dir)
+        cwd_real = os.path.realpath(os.getcwd())
+
+        if not allow_absolute:
+            try:
+                common = os.path.commonpath([resolved_dir, cwd_real])
+            except ValueError:
+                # Different drive letters on Windows → definitely outside CWD
+                common = ""
+            if common != cwd_real:
+                return {
+                    "error": (
+                        "output_dir must be inside the current working directory. "
+                        "Set IDA_MULTI_MCP_ALLOW_ABSOLUTE_OUTPUT=1 to allow absolute paths."
+                    )
+                }
+
         output_dir = resolved_dir
 
         # addr → name mapping (populated by list_funcs when using 'all')
@@ -797,8 +822,19 @@ class IdaMultiMcpServer:
             print(f"[ida-multi-mcp] Failed to discover tools from instance: {e}", file=sys.stderr)
             return []
 
-    def run(self):
-        """Run the MCP server with stdio transport."""
+    def run(self, *, http_host: str | None = None, http_port: int | None = None):
+        """Run the MCP server.
+
+        By default serves over stdio (for local MCP clients that spawn the
+        aggregator as a child process). When ``http_host`` and ``http_port``
+        are given, serves MCP-over-HTTP + SSE on that endpoint instead —
+        use this to reach the aggregator from another host on a trusted LAN.
+
+        Args:
+            http_host: Bind address for HTTP mode (e.g. ``"0.0.0.0"``,
+                ``"192.168.1.50"``). ``None`` keeps stdio.
+            http_port: Port for HTTP mode. Required iff ``http_host`` is set.
+        """
         # Clean up dead instances on startup
         removed = cleanup_stale_instances(self.registry)
         if removed:
@@ -820,16 +856,36 @@ class IdaMultiMcpServer:
         print(f"[ida-multi-mcp] Server starting with {len(self._tool_cache)} tools",
               file=sys.stderr)
 
-        # Run server with stdio transport (idalib cleanup via atexit in IdalibManager)
-        self.server.stdio()
+        if http_host is not None:
+            if http_port is None:
+                raise ValueError("http_port is required when http_host is set")
+            print(
+                f"[ida-multi-mcp] HTTP mode: http://{http_host}:{http_port}/mcp  "
+                f"(SSE: /sse). No authentication — use only on trusted networks.",
+                file=sys.stderr,
+            )
+            # background=False: block on the HTTP loop in the foreground thread
+            # so the process stays alive and Ctrl+C propagates cleanly.
+            self.server.serve(http_host, http_port, background=False)
+        else:
+            # stdio transport (idalib cleanup via atexit in IdalibManager)
+            self.server.stdio()
 
 
-def serve(registry_path: str | None = None, idalib_python: str | None = None):
+def serve(
+    registry_path: str | None = None,
+    idalib_python: str | None = None,
+    *,
+    http_host: str | None = None,
+    http_port: int | None = None,
+):
     """Start the ida-multi-mcp server.
 
     Args:
         registry_path: Optional custom registry path
         idalib_python: Python executable with idapro installed (for headless)
+        http_host: When set, serve HTTP+SSE on this address instead of stdio
+        http_port: Port for HTTP mode (required with http_host)
     """
     server = IdaMultiMcpServer(registry_path, idalib_python=idalib_python)
-    server.run()
+    server.run(http_host=http_host, http_port=http_port)

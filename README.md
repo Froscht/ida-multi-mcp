@@ -287,6 +287,57 @@ Decompile the main function in malware.exe (k7m2)
 Decompile main in malware.exe (k7m2) and compare it with the entry point in dropper.dll (px3a)
 ```
 
+### Remote access over a trusted LAN
+
+Run IDA on a workstation and use it from your laptop without having IDA installed locally. The aggregator can serve MCP over HTTP+SSE instead of stdio.
+
+**On the workstation** (where IDA is installed):
+
+```bash
+# 1. Install the IDA plugin only — leave local MCP client configs alone.
+pip install ida-multi-mcp
+ida-multi-mcp --install --plugin-only
+
+# 2. Start the HTTP aggregator. 0.0.0.0 = all interfaces; use a LAN IP instead if you prefer.
+ida-multi-mcp --http --host 0.0.0.0 --port 8765
+```
+
+Open IDA with a binary — the plugin auto-loads and registers in `~/.ida-mcp/instances.json`. The aggregator's startup line prints where it's listening:
+```
+[ida-multi-mcp] HTTP mode: http://0.0.0.0:8765/mcp  (SSE: /sse).
+```
+
+**On the client** (laptop with Claude Code / Cursor / …, no IDA needed):
+
+```bash
+pip install ida-multi-mcp
+ida-multi-mcp --install --remote http://<workstation-ip>:8765/mcp
+```
+
+This writes an HTTP-transport config (`{"type": "http", "url": "..."}`) into every MCP client config it can find, pointing at the workstation. No plugin is installed on the client. Restart your MCP client(s) to pick up the new config.
+
+For clients that auto-config doesn't cover, print the JSON and paste it yourself:
+```bash
+ida-multi-mcp --config --remote http://<workstation-ip>:8765/mcp
+```
+
+Or wire Claude Code CLI directly:
+```bash
+claude mcp add --transport http ida-multi-mcp http://<workstation-ip>:8765/mcp
+```
+
+> **No authentication is built in** — the HTTP mode is designed for trusted LAN / VPN use. Do not expose the port to the internet without fronting it with a reverse proxy that handles TLS and auth (Caddy, nginx, Cloudflare Tunnel, Tailscale, …).
+
+#### Install-mode cheatsheet
+
+| Command | Plugin | MCP client configs |
+| --- | --- | --- |
+| `ida-multi-mcp --install` | ✔ installed | local stdio (spawns local aggregator) |
+| `ida-multi-mcp --install --plugin-only` | ✔ installed | *untouched* |
+| `ida-multi-mcp --install --remote URL` | *skipped* | HTTP, pointing at `URL` |
+
+`--uninstall` mirrors the three modes.
+
 ## Management Tools
 
 The server provides built-in management tools:

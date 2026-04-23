@@ -207,8 +207,39 @@ def copy_python_env(env):
     return result
 
 
-def generate_mcp_config(*, include_type: bool = False):
-    """Generate MCP server configuration for ida-multi-mcp."""
+def _validate_remote_url(url: str) -> str:
+    """Sanity-check a --remote URL. Returns the normalized URL or raises ValueError."""
+    from urllib.parse import urlparse
+
+    if not url or not url.strip():
+        raise ValueError("remote URL is empty")
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"remote URL must start with http:// or https:// (got {url!r})")
+    if not parsed.netloc:
+        raise ValueError(f"remote URL is missing a host (got {url!r})")
+    return url.strip()
+
+
+def generate_mcp_config(*, include_type: bool = False, remote_url: str | None = None):
+    """Generate MCP server configuration for ida-multi-mcp.
+
+    Args:
+        include_type: If True, include an explicit "type" field in the
+            stdio config (Factory Droid requires this). In remote-URL mode
+            "type" is always included, regardless of this flag.
+        remote_url: If set, emit an HTTP-transport config pointing at this
+            URL instead of the default stdio spawn config. Use this for
+            clients whose IDA / ida-multi-mcp install is on another host.
+    """
+    if remote_url is not None:
+        # HTTP transport — the client connects to a remote aggregator. No
+        # command/args/env (nothing is spawned locally).
+        return {
+            "type": "http",
+            "url": remote_url,
+        }
+
     mcp_config = {
         "command": get_python_executable(),
         "args": ["-m", "ida_multi_mcp"],
@@ -224,17 +255,31 @@ def generate_mcp_config(*, include_type: bool = False):
     return mcp_config
 
 
-def print_mcp_config():
-    """Print MCP client configuration JSON."""
+def print_mcp_config(*, remote_url: str | None = None):
+    """Print MCP client configuration JSON.
+
+    Args:
+        remote_url: If set, print the HTTP-transport variant pointing at
+            this remote aggregator URL.
+    """
     print(
         json.dumps(
-            {"mcpServers": {SERVER_NAME: generate_mcp_config()}}, indent=2
+            {"mcpServers": {SERVER_NAME: generate_mcp_config(remote_url=remote_url)}},
+            indent=2,
         )
     )
 
 
-def install_mcp_servers(uninstall=False, quiet=False):
-    """Auto-configure all known MCP clients for ida-multi-mcp."""
+def install_mcp_servers(uninstall=False, quiet=False, remote_url: str | None = None):
+    """Auto-configure all known MCP clients for ida-multi-mcp.
+
+    Args:
+        uninstall: Remove the ida-multi-mcp entry instead of writing it.
+        quiet: Suppress per-client log output.
+        remote_url: If set, write an HTTP-transport config pointing at this
+            URL (client-side remote setup). When None, writes the default
+            stdio config that spawns the local aggregator.
+    """
     # Map client names to their JSON key paths for clients that don't use "mcpServers"
     # Format: client_name -> (top_level_key, nested_key)
     # None means use default "mcpServers" at top level
@@ -770,7 +815,8 @@ def install_mcp_servers(uninstall=False, quiet=False):
             del mcp_servers[SERVER_NAME]
         else:
             mcp_servers[SERVER_NAME] = generate_mcp_config(
-                include_type=(name == "Factory Droid")
+                include_type=(name == "Factory Droid"),
+                remote_url=remote_url,
             )
 
         # Atomic write: temp file + replace (with Windows-friendly fallback)
@@ -968,11 +1014,10 @@ def _configure_idalib_path():
         print(f"       Set IDADIR={detected} manually.")
 
 
-def cmd_install(args):
-    """Install the IDA plugin and configure MCP clients."""
-    print("Installing ida-multi-mcp...\n")
-
-    # 1. Check prerequisites
+def _install_ida_plugin(ida_dir: str | None) -> int:
+    """Copy/symlink the plugin loader into IDA's plugins directory and
+    attempt idalib path auto-detection. Returns 0 on success, non-zero on
+    a fatal prerequisite problem (the package not being importable)."""
     try:
         import ida_multi_mcp
         print(f"  [ok] ida-multi-mcp package found (v{ida_multi_mcp.__version__})")
@@ -981,37 +1026,31 @@ def cmd_install(args):
         print("       Install with: pip install ida-multi-mcp")
         return 1
 
-    # 2. Install IDA plugin loader
-    ida_plugins_dir = _get_ida_plugins_dir(args.ida_dir)
-
+    ida_plugins_dir = _get_ida_plugins_dir(ida_dir)
     if not ida_plugins_dir.exists():
         print(f"\n  Creating IDA plugins directory: {ida_plugins_dir}")
         ida_plugins_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy the loader file as ida_multi_mcp.py into IDA's plugins directory
     loader_source = Path(__file__).parent / "plugin" / "ida_multi_mcp_loader.py"
     loader_dest = ida_plugins_dir / "ida_multi_mcp.py"
 
-    # Try symlink first (development-friendly), fall back to copy
-    # Use a temporary name + rename to avoid TOCTOU race between unlink/symlink
-    import tempfile
+    # Try symlink first (development-friendly), fall back to copy. Use a
+    # temporary name + rename to avoid TOCTOU race between unlink/symlink.
     loader_tmp = None
     try:
-        # Create symlink/copy at a temp path in the same directory, then atomically rename
         tmp_fd, loader_tmp = tempfile.mkstemp(
             prefix=".ida_multi_mcp_", suffix=".tmp",
             dir=str(ida_plugins_dir),
         )
         os.close(tmp_fd)
-        os.unlink(loader_tmp)  # Remove the temp file so we can create symlink at this path
+        os.unlink(loader_tmp)
 
         try:
             Path(loader_tmp).symlink_to(loader_source)
             os.replace(loader_tmp, str(loader_dest))
-            loader_tmp = None  # Successfully replaced, no cleanup needed
+            loader_tmp = None
             print(f"\n  Symlinked plugin: {loader_dest} -> {loader_source}")
         except (OSError, NotImplementedError):
-            # Symlink failed, fall back to copy + rename
             shutil.copy2(loader_source, loader_tmp)
             os.replace(loader_tmp, str(loader_dest))
             loader_tmp = None
@@ -1025,13 +1064,97 @@ def cmd_install(args):
 
     print("\n  [ok] IDA plugin installed!")
 
-    # 3. Auto-detect IDA installation and write to ida-config.json for idalib
+    # Best-effort idalib path detection (writes ida-config.json).
     _configure_idalib_path()
+    return 0
 
-    # 4. Auto-configure MCP clients
+
+def _uninstall_ida_plugin(ida_dir: str | None) -> None:
+    """Remove the plugin file and the shared registry directory."""
+    ida_plugins_dir = _get_ida_plugins_dir(ida_dir)
+    loader_dest = ida_plugins_dir / "ida_multi_mcp.py"
+
+    if loader_dest.exists() or loader_dest.is_symlink():
+        loader_dest.unlink()
+        print(f"  Removed plugin: {loader_dest}")
+    else:
+        print(f"  Plugin not found at {loader_dest}")
+
+    registry_dir = Path.home() / ".ida-mcp"
+    if registry_dir.exists():
+        # Security: don't follow symlinks (prevent arbitrary deletion).
+        if registry_dir.is_symlink():
+            registry_dir.unlink()
+            print(f"  Removed registry symlink: {registry_dir}")
+        else:
+            for known_file in ["instances.json", "instances.json.lock"]:
+                fpath = registry_dir / known_file
+                if fpath.exists() and not fpath.is_symlink():
+                    fpath.unlink()
+            try:
+                registry_dir.rmdir()
+            except OSError:
+                pass
+            print(f"  Removed registry: {registry_dir}")
+
+
+def cmd_install(args):
+    """Install the IDA plugin and/or configure MCP clients.
+
+    Three modes, mutually exclusive:
+
+    - ``--plugin-only``     → install IDA plugin only (no MCP client configs).
+                               Workstation-side where IDA runs.
+    - ``--remote URL``      → write HTTP-transport MCP client configs pointing
+                               at ``URL`` (no IDA plugin install). Client-side
+                               machine where Claude Code / Cursor / … live but
+                               IDA does not.
+    - (neither)             → install plugin AND write local stdio client
+                               configs. Single-machine setup.
+    """
+    remote_url = getattr(args, "remote", None)
+    plugin_only = getattr(args, "plugin_only", False)
+
+    if remote_url and plugin_only:
+        print("  [!!] --remote and --plugin-only are mutually exclusive.")
+        return 2
+
+    if remote_url:
+        try:
+            remote_url = _validate_remote_url(remote_url)
+        except ValueError as exc:
+            print(f"  [!!] Invalid --remote URL: {exc}")
+            return 2
+        print(f"Installing ida-multi-mcp (remote mode → {remote_url})...\n")
+        print("  Skipping IDA plugin install (remote mode — IDA lives elsewhere).")
+        install_mcp_servers(remote_url=remote_url)
+        print("\n" + "=" * 60)
+        print("Next steps:")
+        print(f"  1. Make sure the workstation serves HTTP on {remote_url}:")
+        print("     ida-multi-mcp --http --host 0.0.0.0 --port 8765")
+        print("  2. Restart your MCP client(s) to pick up the new config.")
+        print("=" * 60)
+        return 0
+
+    print("Installing ida-multi-mcp...\n")
+    plugin_rc = _install_ida_plugin(args.ida_dir)
+    if plugin_rc != 0:
+        return plugin_rc
+
+    if plugin_only:
+        print("\n" + "=" * 60)
+        print("Plugin-only install complete. Next steps:")
+        print("  1. Open IDA Pro — the plugin auto-loads (PLUGIN_FIX).")
+        print("  2. On your MCP-client machine, run:")
+        print("     ida-multi-mcp --install --remote http://<this-host>:8765/mcp")
+        print("  3. Serve HTTP on this workstation so remote clients can reach you:")
+        print("     ida-multi-mcp --http --host 0.0.0.0 --port 8765")
+        print("=" * 60)
+        return 0
+
+    # Default: local all-in-one setup
     print()
     install_mcp_servers()
-
     print("\n" + "=" * 60)
     print("Next steps:")
     print("  1. Restart your MCP client(s) for the config to take effect")
@@ -1042,51 +1165,57 @@ def cmd_install(args):
 
 
 def cmd_uninstall(args):
-    """Uninstall the IDA plugin and remove MCP client configuration."""
+    """Uninstall the IDA plugin and/or remove MCP client configuration.
+
+    Mirrors cmd_install's three modes.
+    """
+    remote_url = getattr(args, "remote", None)
+    plugin_only = getattr(args, "plugin_only", False)
+
+    if remote_url and plugin_only:
+        print("  [!!] --remote and --plugin-only are mutually exclusive.")
+        return 2
+
+    if remote_url:
+        # Validate but don't require it to actually reach anywhere — the URL
+        # is only used to decide which config format to remove.
+        try:
+            remote_url = _validate_remote_url(remote_url)
+        except ValueError as exc:
+            print(f"  [!!] Invalid --remote URL: {exc}")
+            return 2
+        print("Uninstalling ida-multi-mcp (remote mode)...\n")
+        install_mcp_servers(uninstall=True, remote_url=remote_url)
+        print("\n  [ok] ida-multi-mcp client config removed!")
+        return 0
+
     print("Uninstalling ida-multi-mcp...\n")
+    _uninstall_ida_plugin(args.ida_dir)
 
-    # 1. Remove IDA plugin
-    ida_plugins_dir = _get_ida_plugins_dir(args.ida_dir)
-    loader_dest = ida_plugins_dir / "ida_multi_mcp.py"
+    if plugin_only:
+        print("\n  [ok] IDA plugin uninstalled (MCP client configs left untouched).")
+        return 0
 
-    if loader_dest.exists() or loader_dest.is_symlink():
-        loader_dest.unlink()
-        print(f"  Removed plugin: {loader_dest}")
-    else:
-        print(f"  Plugin not found at {loader_dest}")
-
-    # 2. Clean up registry
-    registry_dir = Path.home() / ".ida-mcp"
-    if registry_dir.exists():
-        # Security: don't follow symlinks during uninstall (prevent arbitrary deletion)
-        if registry_dir.is_symlink():
-            registry_dir.unlink()
-            print(f"  Removed registry symlink: {registry_dir}")
-        else:
-            # Only remove known files, not arbitrary directory trees
-            for known_file in ["instances.json", "instances.json.lock"]:
-                fpath = registry_dir / known_file
-                if fpath.exists() and not fpath.is_symlink():
-                    fpath.unlink()
-            # Remove directory only if empty (safe)
-            try:
-                registry_dir.rmdir()
-            except OSError:
-                # Directory not empty (has unexpected files), leave it
-                pass
-            print(f"  Removed registry: {registry_dir}")
-
-    # 3. Remove MCP client configuration
     print()
     install_mcp_servers(uninstall=True)
-
     print("\n  [ok] ida-multi-mcp uninstalled!")
     return 0
 
 
 def cmd_config(args):
-    """Print MCP client configuration JSON."""
-    print_mcp_config()
+    """Print MCP client configuration JSON.
+
+    With --remote URL, prints the HTTP-transport variant so you can paste it
+    into a client config that auto-config didn't cover.
+    """
+    remote_url = getattr(args, "remote", None)
+    if remote_url:
+        try:
+            remote_url = _validate_remote_url(remote_url)
+        except ValueError as exc:
+            print(f"  [!!] Invalid --remote URL: {exc}", file=sys.stderr)
+            return 2
+    print_mcp_config(remote_url=remote_url)
     return 0
 
 
@@ -1124,6 +1253,33 @@ def main():
         help="Python executable with idapro installed (for headless idalib sessions). "
              "Defaults to the same Python running this server."
     )
+    parser.add_argument(
+        "--remote", type=str, default=None, metavar="URL",
+        help="For --install/--uninstall/--config: write MCP client configs pointing "
+             "at a remote aggregator at URL (e.g. http://workstation:8765/mcp) instead "
+             "of the local stdio spawn. Skips IDA plugin install. Use this on the "
+             "client machine when IDA lives on another host."
+    )
+    parser.add_argument(
+        "--plugin-only", action="store_true",
+        help="For --install/--uninstall: touch only the IDA plugin, leave MCP client "
+             "configs untouched. Use this on the workstation where IDA runs, when "
+             "you don't want to modify local MCP client configs."
+    )
+    parser.add_argument(
+        "--http", action="store_true",
+        help="Serve MCP over HTTP+SSE instead of stdio. Use with --host/--port. "
+             "No authentication — only appropriate on trusted networks (LAN, VPN)."
+    )
+    parser.add_argument(
+        "--host", type=str, default="127.0.0.1",
+        help="HTTP bind address (default: 127.0.0.1). Use 0.0.0.0 for all "
+             "interfaces or a specific LAN IP. Ignored without --http."
+    )
+    parser.add_argument(
+        "--port", type=int, default=8765,
+        help="HTTP port (default: 8765). Ignored without --http."
+    )
 
     args = parser.parse_args()
 
@@ -1138,7 +1294,18 @@ def main():
         sys.exit(cmd_config(args))
     else:
         # Default: start MCP server
-        serve(registry_path=args.registry, idalib_python=args.idalib_python)
+        if args.http:
+            serve(
+                registry_path=args.registry,
+                idalib_python=args.idalib_python,
+                http_host=args.host,
+                http_port=args.port,
+            )
+        else:
+            serve(
+                registry_path=args.registry,
+                idalib_python=args.idalib_python,
+            )
 
 
 if __name__ == "__main__":

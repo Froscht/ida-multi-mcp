@@ -122,11 +122,32 @@ class McpHttpRequestHandler(BaseHTTPRequestHandler):
             pass
 
     def _check_host_header(self) -> bool:
-        """Validate Host header to prevent DNS rebinding attacks on all endpoints."""
+        """Validate Host header to prevent DNS rebinding attacks on all endpoints.
+
+        Default policy is loopback-only. When the server is bound to a
+        non-loopback address (``serve(host, port)`` with a LAN IP, or
+        ``0.0.0.0`` for all-interfaces), the server may override this via
+        ``mcp_server._host_allowlist``:
+
+        - ``None``  → default loopback-only behaviour.
+        - ``frozenset(...)`` → explicit allowlist (in addition to loopback).
+        - empty ``frozenset()`` → disabled (any host accepted). Used when the
+          operator explicitly binds to ``0.0.0.0``/``::`` — appropriate for
+          trusted LAN deployments where auth is handled out-of-band.
+        """
         host_header = self.headers.get("Host", "")
-        # Strip port to get hostname
         hostname = host_header.split(":")[0] if host_header else ""
-        if hostname not in ("127.0.0.1", "localhost", "::1", ""):
+
+        allow = getattr(self.mcp_server, "_host_allowlist", None)
+        if allow is None:
+            allowed = hostname in ("127.0.0.1", "localhost", "::1", "")
+        elif len(allow) == 0:
+            # Operator opted out of rebind protection entirely.
+            allowed = True
+        else:
+            allowed = hostname in allow or hostname == ""
+
+        if not allowed:
             self.send_error(403, "Forbidden: invalid Host header")
             return False
         return True
@@ -317,6 +338,9 @@ class McpServer:
         self._protocol_version = threading.local()
         self._enabled_extensions = threading.local()  # set[str] per request
         self._extensions_registry = extensions if extensions is not None else {}  # group -> set of tool names
+        # Host-header allowlist for DNS-rebinding protection — see
+        # McpHttpRequestHandler._check_host_header. None = loopback-only.
+        self._host_allowlist: frozenset[str] | None = None
 
         # Register MCP protocol methods with correct names
         self.registry = JsonRpcRegistry()
@@ -348,6 +372,19 @@ class McpServer:
         if self._running:
             print("[MCP] Server is already running", file=sys.stderr)
             return
+
+        # Configure Host-header policy based on the bind address.
+        # Loopback binds → keep strict loopback-only default.
+        # Wildcard binds (0.0.0.0 / ::) → disable the check entirely; the
+        # operator has already accepted LAN-level trust by choosing this.
+        # Specific non-loopback binds → allow that address plus loopback,
+        # so both LAN clients and in-box clients work.
+        if host in ("127.0.0.1", "localhost", "::1"):
+            self._host_allowlist = None
+        elif host in ("0.0.0.0", "::"):
+            self._host_allowlist = frozenset()
+        else:
+            self._host_allowlist = frozenset({host, "127.0.0.1", "localhost", "::1"})
 
         # Create server with deferred binding
         assert issubclass(request_handler, McpHttpRequestHandler)
