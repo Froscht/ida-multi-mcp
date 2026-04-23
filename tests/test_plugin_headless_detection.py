@@ -36,6 +36,7 @@ def _load_plugin_module(monkeypatch, *, is_idaq: bool, input_path: str = "sample
     registration = types.ModuleType("ida_multi_mcp.plugin.registration")
     registration.register_instance = MagicMock(return_value="abcd")
     registration.unregister_instance = MagicMock()
+    registration.expire_instance = MagicMock()
     registration.update_heartbeat = MagicMock()
     registration.get_binary_metadata = MagicMock(
         return_value={

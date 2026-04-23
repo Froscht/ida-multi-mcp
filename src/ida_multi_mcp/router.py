@@ -7,10 +7,18 @@ import json
 import http.client
 import os
 import time
+from collections import OrderedDict
 from typing import Any
 
 from .registry import InstanceRegistry, ALLOWED_HOSTS
 from .health import query_binary_metadata
+
+
+# Upper bound on cached verify entries. Guards against unbounded growth when
+# many short-lived idalib sessions cycle through the router. Entries beyond
+# this count are LRU-evicted. 200 is well above any realistic concurrent
+# instance count and still tiny in memory.
+_BINARY_PATH_CACHE_MAX = 200
 
 
 class InstanceRouter:
@@ -26,7 +34,10 @@ class InstanceRouter:
             registry: The instance registry
         """
         self.registry = registry
-        self._binary_path_cache: dict[str, tuple[str | None, float]] = {}
+        # OrderedDict so we can LRU-evict the oldest entry when the cache
+        # hits its cap. Instances that expire or go missing also get dropped
+        # explicitly from the cache in the error-handler paths below.
+        self._binary_path_cache: OrderedDict[str, tuple[str | None, float]] = OrderedDict()
         self._cache_timeout = 5.0  # seconds
 
     def route_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +129,8 @@ class InstanceRouter:
         if instance_id in self._binary_path_cache:
             cached_name, cached_time = self._binary_path_cache[instance_id]
             if now - cached_time < self._cache_timeout:
+                # Refresh LRU position on hit
+                self._binary_path_cache.move_to_end(instance_id)
                 # Benefit of doubt when the last query couldn't resolve a name.
                 if cached_name is None:
                     return True
@@ -131,8 +144,11 @@ class InstanceRouter:
         # Extract binary name (module) from metadata
         current_name = _normalize_binary_name(metadata.get("module") if metadata else None)
 
-        # Update cache
+        # Update cache + LRU evict if over cap.
         self._binary_path_cache[instance_id] = (current_name, now)
+        self._binary_path_cache.move_to_end(instance_id)
+        while len(self._binary_path_cache) > _BINARY_PATH_CACHE_MAX:
+            self._binary_path_cache.popitem(last=False)
 
         # If we couldn't query, assume it's valid (benefit of doubt)
         if current_name is None:
@@ -196,6 +212,9 @@ class InstanceRouter:
         Returns:
             Error response with replacement suggestions
         """
+        # Drop any stale verify-cache entry so memory can't accumulate.
+        self._binary_path_cache.pop(instance_id, None)
+
         # Find replacement: same binary name
         binary_name = expired_info.get("binary_name", "")
         instances = self.registry.list_instances()
@@ -231,6 +250,9 @@ class InstanceRouter:
         Returns:
             Error response with available instances
         """
+        # Drop any stale verify-cache entry so memory can't accumulate.
+        self._binary_path_cache.pop(instance_id, None)
+
         instances = self.registry.list_instances()
         return {
             "error": f"Instance '{instance_id}' not found.",

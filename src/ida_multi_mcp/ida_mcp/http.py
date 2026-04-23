@@ -75,7 +75,29 @@ def get_cors_policy(port: int) -> str:
             return f"http://127.0.0.1:{port} http://localhost:{port}"
 
 
-ORIGINAL_TOOLS = handle_enabled_tools(MCP_SERVER.tools, "enabled_tools")
+# Lazy: handle_enabled_tools() calls config_json_get()/config_json_set(), both
+# wrapped in @idasync, which dispatches through idaapi.execute_sync and then
+# blocks on a queue.Queue.get(). Running that at import time deadlocks when
+# this module is imported outside of an IDA GUI main-thread pump — notably
+# inside the idalib worker (which has no wait-box / main-thread dispatcher
+# until after `idapro.open_database` returns). See also
+# scripts/regenerate_tool_schemas.py which ran into the same class of bug.
+_ORIGINAL_TOOLS_CACHE: dict | None = None
+
+
+def _get_original_tools() -> dict:
+    """Return the full set of tools (including ones disabled via config).
+
+    Runs handle_enabled_tools() exactly once, on first call — must be invoked
+    from a context where @idasync can dispatch (i.e. any HTTP request handler
+    thread is fine; import time in a headless worker is not).
+    """
+    global _ORIGINAL_TOOLS_CACHE
+    if _ORIGINAL_TOOLS_CACHE is None:
+        _ORIGINAL_TOOLS_CACHE = handle_enabled_tools(
+            MCP_SERVER.tools, "enabled_tools"
+        )
+    return _ORIGINAL_TOOLS_CACHE
 
 
 class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
@@ -346,7 +368,7 @@ input[type="submit"]:hover {
 
         body += "<h2>Enabled Tools</h2>"
         body += quick_select
-        for name, func in ORIGINAL_TOOLS.items():
+        for name, func in _get_original_tools().items():
             description = (
                 (func.__doc__ or "No description").strip().splitlines()[0].strip()
             )
@@ -388,10 +410,10 @@ input[type="submit"]:hover {
         self.update_cors_policy()
 
         # Update the server's tools
-        enabled_tools = {name: name in postvars for name in ORIGINAL_TOOLS.keys()}
+        enabled_tools = {name: name in postvars for name in _get_original_tools().keys()}
         self.mcp_server.tools.methods = {
             name: func
-            for name, func in ORIGINAL_TOOLS.items()
+            for name, func in _get_original_tools().items()
             if enabled_tools.get(name)
         }
         config_json_set("enabled_tools", enabled_tools)

@@ -23,6 +23,7 @@ if _pkg_dir not in sys.path:
 from ida_multi_mcp.plugin.registration import (
     register_instance,
     unregister_instance,
+    expire_instance,
     update_heartbeat,
     get_binary_metadata,
 )
@@ -183,8 +184,17 @@ class IdaMultiMcpPlugin(idaapi.plugin_t):
                 print(f"[ida-multi-mcp] Heartbeat error: {e}")
             self.stop_event.wait(timeout=60.0)
 
-    def stop_server(self):
-        """Stop the MCP server and unregister from the central registry."""
+    def stop_server(self, expire_reason: str | None = None):
+        """Stop the MCP server and release the registry entry.
+
+        Args:
+            expire_reason: When set, the registry entry is moved to the
+                ``expired`` list with this reason instead of being fully
+                unregistered. Use this on binary-change events (``closebase``)
+                so callers holding the old instance_id get a clear "replaced"
+                hint via router._handle_expired_instance. Use the default
+                (``None``) on plugin termination.
+        """
         if not self.mcp_server:
             return
 
@@ -196,13 +206,15 @@ class IdaMultiMcpPlugin(idaapi.plugin_t):
             self.heartbeat_thread.join(timeout=2.0)
             self.heartbeat_thread = None
 
-        # Unregister from central registry
+        # Release registry entry (expire on binary-change, unregister on term)
         if self.instance_id:
             try:
-                unregister_instance(self.instance_id)
-                print(f"[ida-multi-mcp] Unregistered instance '{self.instance_id}'")
+                if expire_reason is not None:
+                    expire_instance(self.instance_id, reason=expire_reason)
+                else:
+                    unregister_instance(self.instance_id)
             except Exception as e:
-                print(f"[ida-multi-mcp] Failed to unregister: {e}")
+                print(f"[ida-multi-mcp] Failed to release registry entry: {e}")
             self.instance_id = None
 
         # Stop MCP HTTP server
@@ -239,9 +251,10 @@ class IdbHooks(idaapi.IDB_Hooks):
         self.plugin = plugin
 
     def closebase(self):
-        """Called when database is being closed — stop server and unregister."""
+        """Called when database is being closed — expire so the old ID
+        points callers at the replacement instead of vanishing silently."""
         print("[ida-multi-mcp] Database closing")
-        self.plugin.stop_server()
+        self.plugin.stop_server(expire_reason="binary_closed")
         return 0
 
 

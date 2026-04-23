@@ -258,6 +258,11 @@ def rename(batch: RenameBatch) -> dict:
             try:
                 ea = parse_address(item["addr"])
                 had_user_name = _has_user_name(ea)
+                # Default vibe-dir placement state; overwritten only on
+                # successful rename. Avoids UnboundLocalError when set_name
+                # returns False.
+                placed: bool | None = None
+                place_error: str | None = None
                 success = idaapi.set_name(ea, item["name"], idaapi.SN_CHECK)
                 if success:
                     func = idaapi.get_func(ea)
@@ -265,8 +270,6 @@ def rename(batch: RenameBatch) -> dict:
                         refresh_decompiler_ctext(func.start_ea)
                     if not had_user_name and func:
                         placed, place_error = _place_func_in_vibe_dir(func.start_ea)
-                    else:
-                        placed, place_error = None, None
                 results.append(
                     {
                         "addr": item["addr"],

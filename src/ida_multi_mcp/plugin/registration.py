@@ -58,6 +58,34 @@ def unregister_instance(instance_id: str) -> None:
         print(f"[ida-multi-mcp] Failed to unregister instance '{instance_id}'")
 
 
+def expire_instance(instance_id: str, reason: str) -> None:
+    """Move this IDA instance to the expired list with a reason.
+
+    Preferred over ``unregister_instance`` when the IDA process itself is
+    still alive but the database is being closed (binary change) — callers
+    that subsequently look up the old ID get a helpful "replaced_by" hint
+    via router._handle_expired_instance instead of a generic missing-instance
+    error.
+
+    Args:
+        instance_id: Instance ID to expire
+        reason: Short reason string (e.g. "binary_closed", "database_unloaded")
+    """
+    parent_dir = str(Path(__file__).parent.parent.parent)
+    if parent_dir not in sys.path:
+        sys.path.append(parent_dir)
+
+    from ida_multi_mcp.registry import InstanceRegistry, get_default_registry_path
+
+    registry = InstanceRegistry(get_default_registry_path())
+    success = registry.expire_instance(instance_id, reason=reason)
+
+    if success:
+        print(f"[ida-multi-mcp] Expired instance '{instance_id}' ({reason})")
+    else:
+        print(f"[ida-multi-mcp] Failed to expire instance '{instance_id}'")
+
+
 def update_heartbeat(instance_id: str) -> None:
     """Update the heartbeat timestamp for this instance.
 

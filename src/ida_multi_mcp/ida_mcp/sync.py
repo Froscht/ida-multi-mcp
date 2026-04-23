@@ -55,8 +55,14 @@ def _get_tool_timeout_seconds() -> float:
 call_stack = queue.LifoQueue()
 
 
-def _sync_wrapper(ff):
-    """Call a function ff with a specific IDA safety_mode."""
+def _sync_wrapper(ff, get_timeout: float | None = None):
+    """Call a function ff on the IDA main thread via execute_sync.
+
+    ``get_timeout`` caps the wait for execute_sync's dispatch to actually run
+    the callback. If IDA is tearing down or the main-thread pump is dead, the
+    callback is never invoked and ``res_container.get()`` would otherwise
+    block forever; this turns that pathological case into a clear error.
+    """
 
     res_container = queue.Queue()
 
@@ -75,7 +81,13 @@ def _sync_wrapper(ff):
             call_stack.get()
 
     idaapi.execute_sync(runned, idaapi.MFF_WRITE)
-    res = res_container.get()
+    try:
+        res = res_container.get(timeout=get_timeout)
+    except queue.Empty:
+        raise IDASyncError(
+            f"execute_sync dispatch for {ff.__name__!r} did not run within "
+            f"{get_timeout:.1f}s — IDA main thread may be blocked or shutting down"
+        )
     if isinstance(res, Exception):
         raise res
     return res
@@ -89,18 +101,30 @@ def _normalize_timeout(value: object) -> float | None:
         return None
 
 
+_DISPATCH_TIMEOUT_GRACE_SEC = 30.0
+
+
 def sync_wrapper(ff, timeout_override: float | None = None):
-    """Wrapper to enable batch mode during IDA synchronization."""
+    """Wrapper to enable batch mode during IDA synchronization.
+
+    ``idc.batch()`` is set/restored *inside* the execute_sync closure so that
+    it runs on the IDA main thread; setting it on the caller thread (e.g. the
+    HTTP handler thread) races with concurrent tool calls and can corrupt
+    IDA's global state or crash the kernel.
+    """
     # Capture cancel event from thread-local before execute_sync
     cancel_event = get_current_cancel_event()
 
-    old_batch = idc.batch(1)
-    try:
-        timeout = timeout_override
-        if timeout is None:
-            timeout = _get_tool_timeout_seconds()
-        if timeout > 0 or cancel_event is not None:
-            def timed_ff():
+    timeout = timeout_override
+    if timeout is None:
+        timeout = _get_tool_timeout_seconds()
+
+    if timeout > 0 or cancel_event is not None:
+        def timed_ff():
+            # Enter batch mode on the IDA main thread (thread-safe), not on
+            # the caller thread.
+            old_batch = idc.batch(1)
+            try:
                 # Calculate deadline when execution starts on IDA main thread,
                 # not when the request was queued (avoids stale deadlines)
                 deadline = time.monotonic() + timeout if timeout > 0 else None
@@ -118,12 +142,28 @@ def sync_wrapper(ff, timeout_override: float | None = None):
                     return ff()
                 finally:
                     sys.setprofile(old_profile)
+            finally:
+                idc.batch(old_batch)
 
-            timed_ff.__name__ = ff.__name__
-            return _sync_wrapper(timed_ff)
-        return _sync_wrapper(ff)
-    finally:
-        idc.batch(old_batch)
+        timed_ff.__name__ = ff.__name__
+        # Cap the queue wait at tool-timeout + grace so a dead dispatcher
+        # can't hang the handler thread forever.
+        return _sync_wrapper(
+            timed_ff,
+            get_timeout=(timeout + _DISPATCH_TIMEOUT_GRACE_SEC) if timeout > 0 else None,
+        )
+
+    # No timeout / no cancellation: still need batch semantics on the main
+    # thread, and still want a fallback dispatch-wait cap.
+    def batched_ff():
+        old_batch = idc.batch(1)
+        try:
+            return ff()
+        finally:
+            idc.batch(old_batch)
+
+    batched_ff.__name__ = ff.__name__
+    return _sync_wrapper(batched_ff, get_timeout=None)
 
 
 def idasync(f):
