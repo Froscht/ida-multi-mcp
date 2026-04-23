@@ -1,5 +1,17 @@
 [
   {
+    "name": "refresh_caches",
+    "description": "Force-refresh all caches (strings, functions, globals).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
     "name": "lookup_funcs",
     "description": "Get functions by address or name (auto-detects)",
     "inputSchema": {
@@ -222,38 +234,6 @@
     }
   },
   {
-    "name": "refresh_caches",
-    "description": "Force-refresh all caches (strings, functions, globals). Call this after bulk modifications to ensure list_funcs/list_globals return fresh data.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {},
-      "required": []
-    },
-    "outputSchema": {
-      "type": "object",
-      "properties": {
-        "strings": {
-          "type": "integer"
-        },
-        "functions": {
-          "type": "integer"
-        },
-        "globals": {
-          "type": "integer"
-        },
-        "time_ms": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "strings",
-        "functions",
-        "globals",
-        "time_ms"
-      ]
-    }
-  },
-  {
     "name": "imports",
     "description": "List imports",
     "inputSchema": {
@@ -299,6 +279,124 @@
       "required": [
         "pattern"
       ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "server_health",
+    "description": "Health/ready probe for MCP server and current IDB state. Returns\n    uptime, IDB path, auto-analysis status, Hex-Rays availability, and\n    strings cache state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "server_warmup",
+    "description": "Warm up IDA subsystems to reduce first-call latency. Call after\n    connecting to a new instance to ensure analysis is complete and caches\n    are populated before running tools.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "wait_auto_analysis": {
+          "type": "boolean",
+          "description": "Wait for auto analysis queue"
+        },
+        "build_caches": {
+          "type": "boolean",
+          "description": "Build core caches (currently strings)"
+        },
+        "init_hexrays": {
+          "type": "boolean",
+          "description": "Initialize Hex-Rays decompiler plugin"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "func_query",
+    "description": "Query functions with richer filtering than list_funcs. Supports regex\n    name filter, size range, type filter, sort by size/name/addr, and pagination.\n    Example: {name_regex: 'crypt', min_size: 100, sort_by: 'size', descending: true}",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Function query: filter, name_regex, min_size, max_size, has_type, sort_by, descending, offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "imports_query",
+    "description": "Query imports with module and name filters. Example:\n    {module: 'kernel32', filter: '*File*'} to find all kernel32 file I/O imports.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Import query: filter (import name pattern), module (module name pattern), offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "idb_save",
+    "description": "Save active IDB to disk. Call after renaming, retyping, or commenting\n    to persist changes. Optionally specify a custom output path.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Optional destination path (default: current IDB path)"
+        }
+      },
+      "required": []
     },
     "outputSchema": {
       "type": "object"
@@ -373,6 +471,42 @@
             }
           ],
           "description": "Addresses to find cross-references to"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max xrefs per address (default: 100, max: 1000)"
+        }
+      },
+      "required": [
+        "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "xrefs_from",
+    "description": "Get cross-references from specified addresses (symmetric with xrefs_to).\n    Returns outgoing code and data references for each address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Addresses to find cross-references from"
         },
         "limit": {
           "type": "integer",
@@ -701,6 +835,200 @@
       "items": {
         "type": "object"
       }
+    }
+  },
+  {
+    "name": "xref_query",
+    "description": "Query cross-references with direction and type filters.\n    direction='to' finds refs TO addr, 'from' finds refs FROM addr, 'both' finds all.\n    type_filter='code' shows only code xrefs, 'data' only data, 'all' shows both.\n    Supports dedup and pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Xref query: addr, direction (to/from/both), type_filter (code/data/all), offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "insn_query",
+    "description": "Search instructions by mnemonic and/or operand values within a function,\n    segment, or global scope. Uses existing scan infrastructure.\n    Example: {mnem: 'call', func: '0x401000'} or {mnem: 'syscall'}",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Instruction pattern: mnem, op0, op1, op2, op_any, func, segment, offset, count"
+        }
+      },
+      "required": [
+        "queries"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "analyze_batch",
+    "description": "Analyze multiple functions in one call. Selectively include decompilation,\n    disassembly, xrefs, strings, and callees per function. More efficient than\n    calling analyze_function N times \u2014 single IDA round-trip.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Function addresses to analyze"
+        },
+        "include_decompile": {
+          "type": "boolean",
+          "description": "Include pseudocode (default: true)"
+        },
+        "include_asm": {
+          "type": "boolean",
+          "description": "Include disassembly (default: false)"
+        },
+        "include_xrefs": {
+          "type": "boolean",
+          "description": "Include xrefs (default: true)"
+        },
+        "include_strings": {
+          "type": "boolean",
+          "description": "Include strings (default: true)"
+        },
+        "include_callees": {
+          "type": "boolean",
+          "description": "Include callees (default: true)"
+        }
+      },
+      "required": [
+        "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "classify_functions",
+    "description": "Classify functions as thunk/wrapper/leaf/dispatcher/complex based on\n    size, callee count, and flags. Use '*' (default) for all non-library\n    functions. Returns paginated results sorted by address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Function addresses (or '*' for all non-library functions)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Skip first N results (default: 0)"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Max results (default: 500, max: 5000)"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "func_profile",
+    "description": "Per-function profile: size, basic block count, cyclomatic complexity,\n    callee/caller counts, and string count. Useful for prioritizing which\n    functions to analyze deeply. Fills the gap between list_funcs (too little\n    info) and analyze_function (too expensive per call).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addrs": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Function addresses (or '*' for all)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Skip first N (default: 0)"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Max results (default: 100, max: 1000)"
+        },
+        "sort_by": {
+          "type": "string",
+          "description": "Sort key: size, complexity, xref_count, callee_count, name (default: size)"
+        },
+        "descending": {
+          "type": "boolean",
+          "description": "Sort descending (default: true)"
+        }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object"
     }
   },
   {
@@ -1242,6 +1570,38 @@
       },
       "required": [
         "addrs"
+      ]
+    },
+    "outputSchema": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  {
+    "name": "enum_upsert",
+    "description": "Create or extend local enums in an idempotent way. Creates the enum if\n    it doesn't exist, then upserts each member: skips if name+value already match,\n    reports conflict if name or value collides with a different entry. Never\n    destructively replaces existing members.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queries": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "Enum upsert: name, members [{name, value}], bitfield (optional bool)"
+        }
+      },
+      "required": [
+        "queries"
       ]
     },
     "outputSchema": {
@@ -2993,6 +3353,147 @@
       },
       "required": [],
       "additionalProperties": false
+    }
+  },
+  {
+    "name": "make_signature",
+    "description": "Generate a unique byte signature starting at an address.\n\n    Walks instructions forward from ``ea`` until the accumulated pattern is\n    unique in the loaded binary, then returns it in the requested format.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ea": {
+          "type": "string",
+          "description": "Starting address (hex, decimal, or symbol name)"
+        },
+        "sig_type": {
+          "type": "string",
+          "description": "Output format: ida | x64dbg | mask | bitmask"
+        },
+        "wildcard_operands": {
+          "type": "boolean",
+          "description": "Replace operand bytes with wildcards for version resilience"
+        },
+        "continue_outside_function": {
+          "type": "boolean",
+          "description": "Continue walking instructions past the end of the enclosing function"
+        },
+        "wildcard_optimized": {
+          "type": "boolean",
+          "description": "Also wildcard operands whose byte offset inside the instruction is 0"
+        },
+        "max_length": {
+          "type": "integer",
+          "description": "Give up if the signature grows beyond this many bytes"
+        }
+      },
+      "required": [
+        "ea"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "make_xref_signatures",
+    "description": "Generate a signature for each code xref that targets an address.\n\n    Useful for signatureing a function by its callers when the function itself\n    is too generic (e.g. a tiny getter). Signatures are sorted shortest-first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ea": {
+          "type": "string",
+          "description": "Address that xrefs point to (hex, decimal, or name)"
+        },
+        "sig_type": {
+          "type": "string",
+          "description": "Output format: ida | x64dbg | mask | bitmask"
+        },
+        "wildcard_operands": {
+          "type": "boolean",
+          "description": "Wildcard operand bytes"
+        },
+        "continue_outside_function": {
+          "type": "boolean",
+          "description": "Continue past caller function boundaries"
+        },
+        "wildcard_optimized": {
+          "type": "boolean",
+          "description": "Also wildcard zero-offset operands"
+        },
+        "top_n": {
+          "type": "integer",
+          "description": "Return at most N shortest signatures (0 = return all)"
+        },
+        "max_length": {
+          "type": "integer",
+          "description": "Give up a candidate xref if its signature exceeds this many bytes"
+        }
+      },
+      "required": [
+        "ea"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "make_range_signature",
+    "description": "Generate a signature covering an exact address range.\n\n    Unlike :func:`make_signature`, the output is not required to be unique \u2014\n    it simply encodes every byte between ``start_ea`` and ``end_ea`` (with\n    operand wildcarding applied per instruction when requested).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start_ea": {
+          "type": "string",
+          "description": "Range start address (inclusive)"
+        },
+        "end_ea": {
+          "type": "string",
+          "description": "Range end address (exclusive)"
+        },
+        "sig_type": {
+          "type": "string",
+          "description": "Output format: ida | x64dbg | mask | bitmask"
+        },
+        "wildcard_operands": {
+          "type": "boolean",
+          "description": "Wildcard operand bytes"
+        },
+        "wildcard_optimized": {
+          "type": "boolean",
+          "description": "Also wildcard zero-offset operands"
+        }
+      },
+      "required": [
+        "start_ea",
+        "end_ea"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
+    }
+  },
+  {
+    "name": "search_signature",
+    "description": "Search the loaded binary for a signature and return matching addresses.\n\n    Accepts signatures in any of the four output formats plus loose hex with\n    ``?`` / ``??`` wildcards; the input format is auto-detected. If the\n    ``sigmaker`` SIMD speedup package is installed in IDA's Python, the scan\n    uses its AVX2 / NEON / SSE2 implementation automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "signature": {
+          "type": "string",
+          "description": "Signature string in any supported format (IDA, x64Dbg, masked bytes + 'xxxx?x', or C array + '0b1101')"
+        },
+        "max_matches": {
+          "type": "integer",
+          "description": "Stop after this many matches (clamped to 1000)"
+        }
+      },
+      "required": [
+        "signature"
+      ]
+    },
+    "outputSchema": {
+      "type": "object"
     }
   }
 ]
